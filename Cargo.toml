@@ -2,5 +2,17 @@
 name = "rsfuzzymind"
 version = "0.1.0"
 edition = "2021"
+authors = ["fadedreams7 <fadedreams7@email.com>"]
+keywords = ["fuzzy", "logic", "fuzzy logic", "fuzzy set", "fuzzy rule", "inference engine"]
+categories = ["no-std"]
+license-file = "LICENSE"
+description = "A Rust library for fuzzy logic that includes fuzzy set operations, rule-based evaluations, and inference for determining priorities."
+documentation = "https://github.com/fadedreams/rsfuzzymind"
+homepage = "https://github.com/fadedreams/rsfuzzymind"
+repository = "https://github.com/fadedreams/rsfuzzymind"
 
 [dependencies]
+
+[lib]
+name = "rsfuzzymind"
+path = "src/lib.rs"

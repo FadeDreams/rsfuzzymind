@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::sync::Arc;
+use std::cmp::Ordering;
 
+#[derive(Clone)]
 pub struct FuzzySet {
-    pub name: String,
-    membership_function: Box<dyn Fn(f64) -> f64>,
+    name: String,
+    membership_function: Arc<dyn Fn(f64) -> f64 + Send + Sync>,
 }
 
 impl FuzzySet {
-    pub fn new(name: &str, membership_function: Box<dyn Fn(f64) -> f64>) -> Self {
+    pub fn new(name: &str, membership_function: Arc<dyn Fn(f64) -> f64 + Send + Sync>) -> Self {
         FuzzySet {
             name: name.to_string(),
             membership_function,
@@ -17,34 +19,41 @@ impl FuzzySet {
         (self.membership_function)(x)
     }
 
-    pub fn union(&self, other_set: &FuzzySet) -> FuzzySet {
+    pub fn union(&self, other: &FuzzySet) -> FuzzySet {
+        let self_func = Arc::clone(&self.membership_function);
+        let other_func = Arc::clone(&other.membership_function);
+
         FuzzySet::new(
-            &format!("Union({}, {})", self.name, other_set.name),
-            Box::new(move |x| f64::max((self.membership_function)(x), (other_set.membership_function)(x))),
+            &format!("Union({}, {})", self.name, other.name),
+            Arc::new(move |x| f64::max(self_func(x), other_func(x))),
         )
     }
 
-    pub fn intersection(&self, other_set: &FuzzySet) -> FuzzySet {
+    pub fn intersection(&self, other: &FuzzySet) -> FuzzySet {
+        let self_func = Arc::clone(&self.membership_function);
+        let other_func = Arc::clone(&other.membership_function);
+
         FuzzySet::new(
-            &format!("Intersection({}, {})", self.name, other_set.name),
-            Box::new(move |x| f64::min((self.membership_function)(x), (other_set.membership_function)(x))),
+            &format!("Intersection({}, {})", self.name, other.name),
+            Arc::new(move |x| f64::min(self_func(x), other_func(x))),
         )
     }
 
     pub fn complement(&self) -> FuzzySet {
+        let self_func = Arc::clone(&self.membership_function);
+
         FuzzySet::new(
             &format!("Complement({})", self.name),
-            Box::new(move |x| 1.0 - (self.membership_function)(x)),
+            Arc::new(move |x| 1.0 - self_func(x)),
         )
     }
 
     pub fn normalize(&self) -> FuzzySet {
+        let self_func = Arc::clone(&self.membership_function);
+
         FuzzySet::new(
             &format!("Normalized({})", self.name),
-            Box::new(move |x| {
-                let value = (self.membership_function)(x);
-                value / f64::max(1.0, value)
-            }),
+            Arc::new(move |x| self_func(x) / f64::max(1.0, self_func(x))),
         )
     }
 
@@ -52,12 +61,14 @@ impl FuzzySet {
         let mut numerator = 0.0;
         let mut denominator = 0.0;
         let mut x = min_val;
+
         while x <= max_val {
-            let mu = (self.membership_function)(x);
+            let mu = self.membership_degree(x);
             numerator += x * mu;
             denominator += mu;
             x += step;
         }
+
         if denominator == 0.0 {
             0.0
         } else {
@@ -67,15 +78,15 @@ impl FuzzySet {
 }
 
 pub struct FuzzyRule {
-    pub condition: Box<dyn Fn(&HashMap<String, f64>) -> bool>,
-    pub consequence: Box<dyn Fn(&HashMap<String, f64>) -> Result<String, FuzzySet>>,
-    pub weight: f64,
+    condition: Box<dyn Fn(f64) -> bool + Send + Sync>,
+    consequence: FuzzySet,
+    weight: f64,
 }
 
 impl FuzzyRule {
     pub fn new(
-        condition: Box<dyn Fn(&HashMap<String, f64>) -> bool>,
-        consequence: Box<dyn Fn(&HashMap<String, f64>) -> Result<String, FuzzySet>>,
+        condition: Box<dyn Fn(f64) -> bool + Send + Sync>,
+        consequence: FuzzySet,
         weight: f64,
     ) -> Self {
         FuzzyRule {
@@ -85,9 +96,9 @@ impl FuzzyRule {
         }
     }
 
-    pub fn evaluate(&self, inputs: &HashMap<String, f64>) -> Option<(Result<String, FuzzySet>, f64)> {
-        if (self.condition)(inputs) {
-            Some(((self.consequence)(inputs), self.weight))
+    pub fn evaluate(&self, input: f64) -> Option<(FuzzySet, f64)> {
+        if (self.condition)(input) {
+            Some((self.consequence.clone(), self.weight))
         } else {
             None
         }
@@ -95,7 +106,7 @@ impl FuzzyRule {
 }
 
 pub struct InferenceEngine {
-    pub rules: Vec<FuzzyRule>,
+    rules: Vec<FuzzyRule>,
 }
 
 impl InferenceEngine {
@@ -103,29 +114,26 @@ impl InferenceEngine {
         InferenceEngine { rules }
     }
 
-    pub fn infer(&self, inputs: &HashMap<String, f64>) -> String {
-        let mut results = vec![];
-        for rule in &self.rules {
-            if let Some((result, weight)) = rule.evaluate(inputs) {
-                results.push((result, weight));
-            }
-        }
-        self.aggregate_results(results)
+    pub fn infer(&self, input: f64) -> String {
+        let results: Vec<(FuzzySet, f64)> = self
+            .rules
+            .iter()
+            .filter_map(|rule| rule.evaluate(input))
+            .collect();
+
+        self.aggregate_results(&results)
     }
 
-    fn aggregate_results(&self, results: Vec<(Result<String, FuzzySet>, f64)>) -> String {
+    fn aggregate_results(&self, results: &[(FuzzySet, f64)]) -> String {
         if results.is_empty() {
             return "Low Priority".to_string();
         }
 
         let mut total_weight = 0.0;
         let mut weighted_sum = 0.0;
+
         for (result, weight) in results {
-            let priority_value = match result {
-                Ok(priority) => self.priority_mapping(&priority),
-                Err(_) => 0.0,
-            };
-            weighted_sum += priority_value * weight;
+            weighted_sum += self.priority_mapping(&result.name) * weight;
             total_weight += weight;
         }
 
@@ -146,104 +154,15 @@ impl InferenceEngine {
     }
 
     fn reverse_priority_mapping(&self, score: f64) -> String {
-        if score >= 2.5 {
-            "Urgent".to_string()
-        } else if score >= 1.5 {
-            "High Priority".to_string()
-        } else if score >= 0.5 {
-            "Medium Priority".to_string()
-        } else {
-            "Low Priority".to_string()
+        match score.partial_cmp(&2.5) {
+            Some(Ordering::Greater) | Some(Ordering::Equal) => "Urgent".to_string(),
+            _ => match score.partial_cmp(&1.5) {
+                Some(Ordering::Greater) | Some(Ordering::Equal) => "High Priority".to_string(),
+                _ => match score.partial_cmp(&0.5) {
+                    Some(Ordering::Greater) | Some(Ordering::Equal) => "Medium Priority".to_string(),
+                    _ => "Low Priority".to_string(),
+                },
+            },
         }
-    }
-
-    fn get_fuzzy_set_consequences(&self) -> Vec<FuzzySet> {
-        self.rules
-            .iter()
-            .filter_map(|rule| {
-                if let Err(fuzzy_set) = (rule.consequence)(&HashMap::new()) {
-                    Some(fuzzy_set)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    pub fn defuzzify_centroid(&self, min_val: f64, max_val: f64, step: f64) -> f64 {
-        let fuzzy_sets = self.get_fuzzy_set_consequences();
-        let mut numerator = 0.0;
-        let mut denominator = 0.0;
-        let mut x = min_val;
-        while x <= max_val {
-            let mu = fuzzy_sets.iter()
-                .map(|fs| fs.membership_degree(x))
-                .fold(0.0, f64::max);
-            numerator += x * mu;
-            denominator += mu;
-            x += step;
-        }
-        if denominator == 0.0 {
-            0.0
-        } else {
-            numerator / denominator
-        }
-    }
-
-    pub fn defuzzify_mom(&self, min_val: f64, max_val: f64, step: f64) -> f64 {
-        let fuzzy_sets = self.get_fuzzy_set_consequences();
-        let mut max_mu = 0.0;
-        let mut sum_x = 0.0;
-        let mut count = 0.0;
-        let mut x = min_val;
-        while x <= max_val {
-            let mu = fuzzy_sets.iter()
-                .map(|fs| fs.membership_degree(x))
-                .fold(0.0, f64::max);
-            if mu > max_mu {
-                max_mu = mu;
-                sum_x = x;
-                count = 1.0;
-            } else if mu == max_mu {
-                sum_x += x;
-                count += 1.0;
-            }
-            x += step;
-        }
-        if count == 0.0 {
-            0.0
-        } else {
-            sum_x / count
-        }
-    }
-
-    pub fn defuzzify_bisector(&self, min_val: f64, max_val: f64, step: f64) -> f64 {
-        let fuzzy_sets = self.get_fuzzy_set_consequences();
-        let mut total_area = 0.0;
-        let mut left_area = 0.0;
-        let mut bisector = min_val;
-        let mut x = min_val;
-        while x <= max_val {
-            let mu = fuzzy_sets.iter()
-                .map(|fs| fs.membership_degree(x))
-                .fold(0.0, f64::max);
-            total_area += mu * step;
-            x += step;
-        }
-        x = min_val;
-        while x <= max_val {
-            let mu = fuzzy_sets.iter()
-                .map(|fs| fs.membership_degree(x))
-                .fold(0.0, f64::max);
-            left_area += mu * step;
-            if left_area >= total_area / 2.0 {
-                bisector = x;
-                break;
-            }
-            x += step;
-        }
-        bisector
     }
 }
-
-
